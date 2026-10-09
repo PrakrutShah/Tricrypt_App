@@ -19,12 +19,12 @@ enum BarcodeShareState {
 
 class BarcodeScreen extends StatefulWidget {
   final File? preselectedImage;
-  final VoidCallback? onBackToHome;
+  final VoidCallback? onGoHome;
 
   const BarcodeScreen({
     super.key,
     this.preselectedImage,
-    this.onBackToHome,
+    this.onGoHome,
   });
 
   @override
@@ -56,12 +56,14 @@ class _BarcodeScreenState extends State<BarcodeScreen> {
         });
       }
     } catch (_) {
-      await TriCryptPermissionDialog.show(
-        context,
-        permissionName: 'Photo Library',
-        description: 'TriCrypt requires access to select an image for QR transfer.',
-        icon: Icons.photo_library_outlined,
-      );
+      if (mounted) {
+        await TriCryptPermissionDialog.show(
+          context,
+          permissionName: 'Photo Library',
+          description: 'TriCrypt requires access to select an image for QR transfer.',
+          icon: Icons.photo_library_outlined,
+        );
+      }
     }
   }
 
@@ -122,19 +124,11 @@ class _BarcodeScreenState extends State<BarcodeScreen> {
   void _openScanner() {
     Navigator.of(context).push(
       PageRouteBuilder(
-        pageBuilder: (_, __, ___) => const ScannerScreen(),
-        transitionsBuilder: (_, animation, __, child) =>
+        pageBuilder: (_, _, _) => const ScannerScreen(),
+        transitionsBuilder: (_, animation, _, child) =>
             FadeTransition(opacity: animation, child: child),
       ),
     );
-  }
-
-  void _handleBack() {
-    if (widget.onBackToHome != null) {
-      widget.onBackToHome!();
-    } else if (Navigator.of(context).canPop()) {
-      Navigator.of(context).pop();
-    }
   }
 
   @override
@@ -147,35 +141,12 @@ class _BarcodeScreenState extends State<BarcodeScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  GestureDetector(
-                    onTap: _handleBack,
-                    child: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: AppColors.card,
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: AppColors.accentCyan.withValues(alpha: 0.6),
-                          width: 1,
-                        ),
-                      ),
-                      child: const Icon(
-                        Icons.arrow_back,
-                        color: AppColors.accentCyan,
-                        size: 20,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  const GradientTitle(
-                    text: 'Barcode',
-                    fontSize: 28,
-                  ),
-                ],
+              // Title: "Barcode". Subtitle: "SELECT IMAGE TO SHARE"
+              const GradientTitle(
+                text: 'Barcode',
+                fontSize: 28,
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
 
               const Text(
                 AppStrings.selectImageToShare,
@@ -337,7 +308,7 @@ class _BarcodeScreenState extends State<BarcodeScreen> {
         );
 
       case BarcodeShareState.waitingForScan:
-        final qrPayload = 'TRICRYPT:${_confirmationCode}:${_selectedImage?.path.split(Platform.pathSeparator).last}';
+        final qrPayload = 'TRICRYPT:$_confirmationCode:${_selectedImage?.path.split(Platform.pathSeparator).last}';
         return BracketBox(
           width: 260,
           height: 260,

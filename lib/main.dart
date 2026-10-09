@@ -36,7 +36,7 @@ void main() async {
     try {
       await Supabase.initialize(
         url: SupabaseConfig.supabaseUrl,
-        anonKey: SupabaseConfig.supabaseAnonKey,
+        publishableKey: SupabaseConfig.publishableKey,
       );
     } catch (e) {
       if (kDebugMode) print('Supabase initialization warning: $e');

@@ -21,8 +21,8 @@ class PreviewScreen extends StatelessWidget {
   void _shareViaQr(BuildContext context) {
     Navigator.of(context).push(
       PageRouteBuilder(
-        pageBuilder: (_, __, ___) => BarcodeScreen(preselectedImage: imageFile),
-        transitionsBuilder: (_, animation, __, child) =>
+        pageBuilder: (_, _, _) => BarcodeScreen(preselectedImage: imageFile),
+        transitionsBuilder: (_, animation, _, child) =>
             FadeTransition(opacity: animation, child: child),
       ),
     );
@@ -58,7 +58,7 @@ class PreviewScreen extends StatelessWidget {
                     child: Image.file(
                       imageFile,
                       fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) => const Center(
+                      errorBuilder: (_, _, _) => const Center(
                         child: Icon(
                           Icons.broken_image_outlined,
                           size: 64,

@@ -1,24 +1,61 @@
 import 'dart:io';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:gal/gal.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:open_filex/open_filex.dart';
+import '../../backend/stego.dart';
 import '../../core/constants.dart';
 import '../../core/services.dart';
 import '../../core/theme.dart';
-import '../../core/validators.dart';
 import '../../core/widgets.dart';
 import '../../data/album_db.dart';
-import '../../data/secure_store.dart';
 import '../../data/stubs.dart';
 import '../preview/preview.dart';
 
-enum ViewState { idle, decoding, success, accessDenied }
+enum ViewScreenState { idle, processing, done }
+
+enum ItemDecodeStatus {
+  pending,
+  missingCredential,
+  decoding,
+  success,
+  accessDenied,
+  notTriCrypt,
+}
+
+class ViewQueueItem {
+  final File encodedFile;
+  final String filename;
+  String encryptionType; // 'biometric', 'passkey', 'both'
+  ItemDecodeStatus status;
+  double progress;
+  File? decodedResult;
+  String? missingType; // 'passkey' or 'biometric'
+  String? satisfiedCredential;
+
+  ViewQueueItem({
+    required this.encodedFile,
+    required this.filename,
+    this.encryptionType = 'passkey',
+    this.status = ItemDecodeStatus.pending,
+    this.progress = 0.0,
+    this.decodedResult,
+    this.missingType,
+    this.satisfiedCredential,
+  });
+
+  bool get isImageResult {
+    if (decodedResult == null) return false;
+    final ext = decodedResult!.path.toLowerCase().split('.').last;
+    return ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'].contains(ext);
+  }
+}
 
 class ViewScreen extends StatefulWidget {
   final File? initialImage;
-  final VoidCallback? onBackToHome;
+  final VoidCallback? onGoHome;
 
-  const ViewScreen({super.key, this.initialImage, this.onBackToHome});
+  const ViewScreen({super.key, this.initialImage, this.onGoHome});
 
   @override
   State<ViewScreen> createState() => _ViewScreenState();
@@ -26,304 +63,106 @@ class ViewScreen extends StatefulWidget {
 
 class _ViewScreenState extends State<ViewScreen> {
   final List<File> _encodedImages = [];
+  final List<ViewQueueItem> _queueItems = [];
 
-  // Multi-select toggles
-  bool _biometricOn = false;
-  bool _passwordOn = false;
-  bool _passkeyOn = false;
-  bool _hasBiometricsEnrolled = false;
-
-  ViewState _state = ViewState.idle;
-  double _progress = 0.0;
-  File? _decodedFile;
-  final List<File> _decodedFiles = [];
+  ViewScreenState _state = ViewScreenState.idle;
   String? _errorMessage;
 
-  final ImagePicker _picker = ImagePicker();
+  final ImagePicker _imagePicker = ImagePicker();
   final BiometricService _biometricService = BiometricService();
   final AlbumDb _albumDb = AlbumDb();
-  final SecureStore _secureStore = SecureStore();
+  String? _enteredPasskey;
 
   @override
   void initState() {
     super.initState();
     if (widget.initialImage != null) {
       _encodedImages.add(widget.initialImage!);
-    }
-    _checkBiometrics();
-    if (_encodedImages.isNotEmpty) {
-      _detectEncryptionType();
+      _autoGroupByAuthType();
     }
   }
 
-  Future<void> _checkBiometrics() async {
-    final enrolled = await _biometricService.hasEnrolledBiometrics();
-    if (mounted) {
-      setState(() {
-        _hasBiometricsEnrolled = enrolled;
-      });
-    }
-  }
-
-  Future<void> _detectEncryptionType() async {
-    if (_encodedImages.isEmpty) return;
-    try {
-      final allItems = await _albumDb.getAllItems();
-      final firstPath = _encodedImages.first.path;
-      final match = allItems.where((i) => i.filepath == firstPath).toList();
-      if (match.isNotEmpty) {
-        final enc = match.first.encryptionType.toLowerCase();
-        setState(() {
-          _biometricOn = enc.contains('biometric');
-          _passwordOn = enc.contains('password');
-          _passkeyOn = enc.contains('passkey');
-        });
-      }
-    } catch (_) {}
-  }
-
-  bool get _hasAnyAuthSelected => _biometricOn || _passwordOn || _passkeyOn;
-
-  bool get _canShowDecodeButton =>
-      _encodedImages.isNotEmpty &&
-      _hasAnyAuthSelected &&
-      _state == ViewState.idle;
-
-  Future<void> _pickEncodedImage() async {
-    if (_state == ViewState.decoding) return;
+  Future<void> _pickEncodedImages() async {
+    if (_state == ViewScreenState.processing) return;
 
     try {
-      final List<XFile> pickedList = await _picker.pickMultiImage();
+      final List<XFile> pickedList = await _imagePicker.pickMultiImage();
       if (pickedList.isNotEmpty) {
-        setState(() {
-          _encodedImages.clear();
-          _encodedImages.addAll(pickedList.map((x) => File(x.path)));
-          _errorMessage = null;
-          _state = ViewState.idle;
-          _decodedFile = null;
-          _decodedFiles.clear();
-        });
-        await _detectEncryptionType();
+        final currentCount = _encodedImages.length;
+        final newlySelected = pickedList.map((x) => File(x.path)).toList();
+
+        if (currentCount + newlySelected.length > 10) {
+          setState(() {
+            _errorMessage = AppStrings.maxSelectionsError;
+          });
+          final allowed = 10 - currentCount;
+          if (allowed > 0) {
+            _encodedImages.addAll(newlySelected.take(allowed));
+          }
+        } else {
+          setState(() => _errorMessage = null);
+          _encodedImages.addAll(newlySelected);
+        }
+
+        await _autoGroupByAuthType();
       }
     } catch (_) {}
   }
 
-  Future<void> _startDecode() async {
-    if (!_canShowDecodeButton) return;
+  void _removeEncodedImage(int index) {
+    if (_state == ViewScreenState.processing) return;
+    setState(() {
+      _encodedImages.removeAt(index);
+      _errorMessage = null;
+    });
+    _autoGroupByAuthType();
+  }
 
-    String passwordVal = '';
-    String passkeyVal = '';
+  Future<void> _autoGroupByAuthType() async {
+    _queueItems.clear();
+    final allDbItems = await _albumDb.getAllItems();
 
-    // Step 1: If Password check is enabled, capture password first
-    if (_passwordOn) {
-      final pass = await _showPasswordPrompt();
-      if (pass == null) return; // Cancelled -> abort sequence, return to pre-action state
-      passwordVal = pass;
-    }
+    for (final img in _encodedImages) {
+      final fname = img.path.split(Platform.pathSeparator).last;
+      String encType = 'passkey'; // Default fallback
 
-    // Step 2: If Passkey check is enabled, capture passkey next
-    if (_passkeyOn) {
-      final pKey = await _showPasskeyPrompt();
-      if (pKey == null) return; // Cancelled -> abort sequence, return to pre-action state
-      passkeyVal = pKey;
-    }
-
-    // Step 3: If Biometric check is enabled, authenticate with biometrics
-    if (_biometricOn) {
-      final bioSuccess = await _biometricService.authenticate(
-        reason: 'Authenticate to decode and reveal hidden payload',
-      );
-      if (!bioSuccess) {
-        _triggerAccessDenied();
-        return; // Failed/cancelled -> abort sequence, return to pre-action state
-      }
-    }
-
-    // Verification against saved credentials
-    try {
-      final allItems = await _albumDb.getAllItems();
-      for (final encImg in _encodedImages) {
-        final match = allItems.where((i) => i.filepath == encImg.path).toList();
-        if (match.isNotEmpty) {
-          final savedCred = await _secureStore.getFileCredential('${match.first.id}');
-          if (savedCred != null && savedCred.isNotEmpty) {
-            if (_passwordOn && !savedCred.contains('pwd:$passwordVal') && !savedCred.contains(passwordVal)) {
-              _triggerAccessDenied();
-              return;
-            }
-            if (_passkeyOn && !savedCred.contains('pk:$passkeyVal') && !savedCred.contains(passkeyVal)) {
-              _triggerAccessDenied();
-              return;
+      try {
+        final bytes = await img.readAsBytes();
+        final headerType = await TriCryptStego.inspectEncryptionType(bytes);
+        if (headerType != null) {
+          encType = headerType;
+        } else {
+          final match = allDbItems.where(
+            (i) => i.filepath == img.path || i.filename == fname,
+          );
+          if (match.isNotEmpty) {
+            final rawType = match.first.encryptionType.toLowerCase();
+            if (rawType.contains('both')) {
+              encType = 'both';
+            } else if (rawType.contains('biometric')) {
+              encType = 'biometric';
+            } else {
+              encType = 'passkey';
             }
           }
         }
-      }
-    } catch (_) {}
-
-    // All enabled checks successfully completed! Proceed to progress bar and decoding
-    setState(() {
-      _state = ViewState.decoding;
-      _progress = 0.0;
-      _errorMessage = null;
-      _decodedFiles.clear();
-    });
-
-    try {
-      final credentialsList = <String>[];
-      if (_passwordOn) credentialsList.add('pwd:$passwordVal');
-      if (_passkeyOn) credentialsList.add('pk:$passkeyVal');
-      if (_biometricOn) credentialsList.add('bio:authenticated');
-      final combinedCredential = credentialsList.join(';');
-
-      final types = <String>[];
-      if (_biometricOn) types.add('biometric');
-      if (_passwordOn) types.add('password');
-      if (_passkeyOn) types.add('passkey');
-
-      for (int i = 0; i < _encodedImages.length; i++) {
-        final enc = _encodedImages[i];
-        final decoded = await TriCryptStubs.decodeImage(
-          encoded: enc,
-          credential: combinedCredential,
-          onProgress: (prog) {
-            if (mounted) {
-              final overall = (i + prog) / _encodedImages.length;
-              setState(() => _progress = overall);
-            }
-          },
-        );
-
-        final filename = decoded.path.split(Platform.pathSeparator).last;
-        await _albumDb.insertItem(
-          AlbumItem(
-            filename: filename,
-            filepath: decoded.path,
-            type: 'decoded',
-            encryptionType: types.join('+'),
-            timestamp: DateTime.now().millisecondsSinceEpoch,
-            thumbnailPath: enc.path,
-          ),
-        );
-        _decodedFiles.add(decoded);
+      } catch (_) {
+        // Fallback
       }
 
-      if (mounted) {
-        setState(() {
-          _decodedFile = _decodedFiles.isNotEmpty ? _decodedFiles.first : null;
-          _progress = 1.0;
-          _state = ViewState.success;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _state = ViewState.idle;
-          _errorMessage = AppStrings.noHiddenData;
-        });
-      }
+      _queueItems.add(
+        ViewQueueItem(
+          encodedFile: img,
+          filename: fname,
+          encryptionType: encType,
+        ),
+      );
     }
+
+    if (mounted) setState(() {});
   }
 
-  void _triggerAccessDenied() {
-    setState(() {
-      _state = ViewState.accessDenied;
-      _errorMessage = AppStrings.accessDenied;
-    });
-
-    Future.delayed(const Duration(seconds: 2), () {
-      if (mounted) {
-        setState(() {
-          _state = ViewState.idle;
-          _errorMessage = null;
-        });
-      }
-    });
-  }
-
-  Future<String?> _showPasswordPrompt() async {
-    final passwordCtrl = TextEditingController();
-    String? error;
-
-    return showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setDialogState) {
-            return Dialog(
-              backgroundColor: Colors.transparent,
-              insetPadding: const EdgeInsets.symmetric(horizontal: 24),
-              child: BracketBox(
-                cornerColor: AppColors.accentCyan,
-                cornerLength: 20,
-                strokeWidth: 2,
-                backgroundColor: AppColors.card,
-                padding: const EdgeInsets.all(22),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const GradientTitle(
-                      text: 'Enter Password',
-                      fontSize: 22,
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      'Enter the password used when encrypting this image.',
-                      style: TextStyle(
-                        fontFamily: AppTheme.fontMonospace,
-                        fontSize: 12,
-                        color: AppColors.textGrey,
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    BracketTextField(
-                      label: 'PASSWORD',
-                      controller: passwordCtrl,
-                      isPassword: true,
-                      errorText: error,
-                      hintText: '••••••••',
-                      onChanged: (_) {
-                        if (error != null) setDialogState(() => error = null);
-                      },
-                    ),
-                    const SizedBox(height: 24),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: PrimaryButton(
-                            text: 'CANCEL',
-                            borderColor: AppColors.textGrey,
-                            textColor: AppColors.textGrey,
-                            onPressed: () => Navigator.of(ctx).pop(null),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: PrimaryButton(
-                            text: 'DECODE',
-                            onPressed: () {
-                              if (passwordCtrl.text.isEmpty) {
-                                setDialogState(() => error = 'Password is required');
-                                return;
-                              }
-                              Navigator.of(ctx).pop(passwordCtrl.text);
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Future<String?> _showPasskeyPrompt() async {
+  Future<String?> _showPasskeyPrompt({String title = 'Enter Passkey'}) async {
     final passkeyCtrl = TextEditingController();
     String? error;
 
@@ -346,13 +185,13 @@ class _ViewScreenState extends State<ViewScreen> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const GradientTitle(
-                      text: 'Enter Passkey',
+                    GradientTitle(
+                      text: title,
                       fontSize: 22,
                     ),
                     const SizedBox(height: 6),
                     const Text(
-                      'Enter the passkey used when encrypting this image.',
+                      'Enter the passkey associated with this encrypted image.',
                       style: TextStyle(
                         fontFamily: AppTheme.fontMonospace,
                         fontSize: 12,
@@ -406,31 +245,260 @@ class _ViewScreenState extends State<ViewScreen> {
     );
   }
 
-  void _saveToGallery(File file) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Saved to gallery'),
-        duration: Duration(seconds: 2),
-      ),
-    );
-  }
+  Future<void> _startRevealSequence() async {
+    if (_encodedImages.isEmpty) return;
 
-  void _openPreview(File file) {
-    Navigator.of(context).push(
-      PageRouteBuilder(
-        pageBuilder: (_, __, ___) => PreviewScreen(imageFile: file),
-        transitionsBuilder: (_, animation, __, child) =>
-            FadeTransition(opacity: animation, child: child),
-      ),
-    );
-  }
+    setState(() {
+      _state = ViewScreenState.processing;
+      _errorMessage = null;
+    });
 
-  void _handleBack() {
-    if (widget.onBackToHome != null) {
-      widget.onBackToHome!();
-    } else if (Navigator.of(context).canPop()) {
-      Navigator.of(context).pop();
+    // Check which groups are present
+    final hasBiometricGroup = _queueItems.any((i) => i.encryptionType == 'biometric');
+    final hasPasskeyGroup = _queueItems.any((i) => i.encryptionType == 'passkey');
+    final hasBothGroup = _queueItems.any((i) => i.encryptionType == 'both');
+
+    String? passkeyVal;
+    bool biometricPassed = false;
+
+    // Sequential group unlocking:
+    // 1. Passkey-only group
+    if (hasPasskeyGroup) {
+      passkeyVal = await _showPasskeyPrompt(title: 'Passkey Required');
+      _enteredPasskey = passkeyVal;
+      if (passkeyVal == null) {
+        // User cancelled passkey prompt for passkey-only group
+        for (final item in _queueItems.where((i) => i.encryptionType == 'passkey')) {
+          item.status = ItemDecodeStatus.accessDenied;
+        }
+      }
     }
+
+    // 2. Biometric-only group
+    if (hasBiometricGroup) {
+      biometricPassed = await _biometricService.authenticate(
+        reason: 'Authenticate to reveal biometric-secured images',
+      );
+      if (!biometricPassed) {
+        for (final item in _queueItems.where((i) => i.encryptionType == 'biometric')) {
+          item.status = ItemDecodeStatus.accessDenied;
+        }
+      }
+    }
+
+    // 3. Both group (Passkey first, then Biometric)
+    if (hasBothGroup) {
+      String? bothPasskey = passkeyVal;
+      bothPasskey ??= await _showPasskeyPrompt(title: 'Passkey Required');
+      _enteredPasskey = bothPasskey;
+
+      bool bothBioPassed = biometricPassed;
+      if (bothPasskey != null && !bothBioPassed) {
+        bothBioPassed = await _biometricService.authenticate(
+          reason: 'Authenticate with fingerprint or Face ID',
+        );
+      }
+
+      // Handle individual files in Both group
+      for (final item in _queueItems.where((i) => i.encryptionType == 'both')) {
+        if (bothPasskey == null && !bothBioPassed) {
+          item.status = ItemDecodeStatus.missingCredential;
+          item.missingType = 'passkey';
+        } else if (bothPasskey == null && bothBioPassed) {
+          item.status = ItemDecodeStatus.missingCredential;
+          item.missingType = 'passkey';
+          item.satisfiedCredential = 'bio:authenticated';
+        } else if (bothPasskey != null && !bothBioPassed) {
+          item.status = ItemDecodeStatus.missingCredential;
+          item.missingType = 'biometric';
+          item.satisfiedCredential = 'pk:$bothPasskey';
+        } else {
+          item.satisfiedCredential = 'both:pk:$bothPasskey:bio:authenticated';
+        }
+      }
+    }
+
+    // Process all queue items that have satisfied credentials
+    await _processReadyQueueItems();
+
+    if (mounted) {
+      setState(() {
+        _state = ViewScreenState.done;
+      });
+    }
+  }
+
+  Future<void> _processReadyQueueItems() async {
+    for (int idx = 0; idx < _queueItems.length; idx++) {
+      final item = _queueItems[idx];
+      if (item.status == ItemDecodeStatus.missingCredential ||
+          item.status == ItemDecodeStatus.accessDenied) {
+        continue;
+      }
+
+      setState(() {
+        item.status = ItemDecodeStatus.decoding;
+        item.progress = 0.0;
+      });
+
+      final credentialsByType = <String, String>{};
+      if (item.encryptionType == 'biometric') {
+        credentialsByType['biometric'] = 'bio:authenticated';
+      } else if (item.encryptionType == 'passkey') {
+        credentialsByType['passkey'] = 'pk:${_enteredPasskey ?? ""}';
+      } else {
+        credentialsByType['passkey'] = 'pk:${_enteredPasskey ?? ""}';
+        credentialsByType['biometric'] = 'bio:authenticated';
+        credentialsByType['both'] = item.satisfiedCredential ??
+            'both:pk:${_enteredPasskey ?? ""}:bio:authenticated';
+      }
+
+      await TriCryptStubs.decodeImage(
+        [item.encodedFile],
+        credentialsByType,
+        (fileIdx, prog) {
+          if (mounted) {
+            setState(() {
+              item.progress = prog;
+            });
+          }
+        },
+        (fileIdx, decodedFile) async {
+          final fname = decodedFile.path.split(Platform.pathSeparator).last;
+          await _albumDb.insertItem(
+            AlbumItem(
+              filename: fname,
+              filepath: decodedFile.path,
+              type: 'decoded',
+              encryptionType: item.encryptionType,
+              timestamp: DateTime.now().millisecondsSinceEpoch,
+              thumbnailPath: item.encodedFile.path,
+            ),
+          );
+
+          if (mounted) {
+            setState(() {
+              item.status = ItemDecodeStatus.success;
+              item.progress = 1.0;
+              item.decodedResult = decodedFile;
+            });
+          }
+        },
+        (fileIdx, err) {
+          if (mounted) {
+            setState(() {
+              if (err.kind == DecodeErrorKind.notTriCryptImage) {
+                item.status = ItemDecodeStatus.notTriCrypt;
+              } else if (err.kind == DecodeErrorKind.missingCredential) {
+                item.status = ItemDecodeStatus.missingCredential;
+                item.missingType = err.missingType;
+              } else {
+                item.status = ItemDecodeStatus.accessDenied;
+              }
+            });
+          }
+        },
+      );
+    }
+  }
+
+  Future<void> _provideMissingCredential(ViewQueueItem item) async {
+    if (item.missingType == 'passkey') {
+      final pKey = await _showPasskeyPrompt(title: 'Provide Missing Passkey');
+      if (pKey != null) {
+        _enteredPasskey = pKey;
+        setState(() {
+          item.satisfiedCredential = 'both:pk:$pKey:bio:authenticated';
+          item.status = ItemDecodeStatus.pending;
+        });
+        await _processReadyQueueItems();
+      }
+    } else if (item.missingType == 'biometric') {
+      final bioPassed = await _biometricService.authenticate(
+        reason: 'Provide missing biometric credential',
+      );
+      if (bioPassed) {
+        setState(() {
+          item.satisfiedCredential =
+              'both:pk:${_enteredPasskey ?? "pass"}:bio:authenticated';
+          item.status = ItemDecodeStatus.pending;
+        });
+        await _processReadyQueueItems();
+      }
+    }
+  }
+
+  Future<void> _retrySingleItem(ViewQueueItem item) async {
+    if (item.encryptionType == 'passkey' || item.encryptionType == 'both') {
+      final pKey = await _showPasskeyPrompt(title: 'Retry Passkey');
+      if (pKey != null) {
+        _enteredPasskey = pKey;
+        setState(() {
+          item.status = ItemDecodeStatus.pending;
+          item.satisfiedCredential = item.encryptionType == 'both'
+              ? 'both:pk:$pKey:bio:authenticated'
+              : 'pk:$pKey';
+        });
+        await _processReadyQueueItems();
+      }
+    } else {
+      final bioPassed = await _biometricService.authenticate(
+        reason: 'Retry Biometric Authentication',
+      );
+      if (bioPassed) {
+        setState(() {
+          item.status = ItemDecodeStatus.pending;
+          item.satisfiedCredential = 'bio:auth';
+        });
+        await _processReadyQueueItems();
+      }
+    }
+  }
+
+  Future<void> _saveDecodedToGallery(File file) async {
+    try {
+      final ext = file.path.toLowerCase();
+      if (ext.endsWith('.png') ||
+          ext.endsWith('.jpg') ||
+          ext.endsWith('.jpeg') ||
+          ext.endsWith('.webp') ||
+          ext.endsWith('.gif')) {
+        await Gal.putImage(file.path);
+      } else if (ext.endsWith('.mp4') || ext.endsWith('.mov') || ext.endsWith('.avi')) {
+        await Gal.putVideo(file.path);
+      }
+    } catch (_) {}
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Saved to gallery'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  void _openDecodedFile(File file, bool isImage) {
+    if (isImage) {
+      Navigator.of(context).push(
+        PageRouteBuilder(
+          pageBuilder: (_, _, _) => PreviewScreen(imageFile: file),
+          transitionsBuilder: (_, animation, _, child) =>
+              FadeTransition(opacity: animation, child: child),
+        ),
+      );
+    } else {
+      OpenFilex.open(file.path);
+    }
+  }
+
+  void _resetToIdle() {
+    setState(() {
+      _state = ViewScreenState.idle;
+      _encodedImages.clear();
+      _queueItems.clear();
+      _errorMessage = null;
+    });
   }
 
   @override
@@ -445,34 +513,10 @@ class _ViewScreenState extends State<ViewScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Top bar with Back Arrow
-                Row(
-                  children: [
-                    GestureDetector(
-                      onTap: _handleBack,
-                      child: Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: AppColors.card,
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: AppColors.accentCyan.withValues(alpha: 0.6),
-                            width: 1,
-                          ),
-                        ),
-                        child: const Icon(
-                          Icons.arrow_back,
-                          color: AppColors.accentCyan,
-                          size: 20,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    const GradientTitle(
-                      text: 'View',
-                      fontSize: 28,
-                    ),
-                  ],
+                // Title: "View". No back arrow.
+                const GradientTitle(
+                  text: 'View',
+                  fontSize: 28,
                 ),
 
                 const SizedBox(height: 20),
@@ -481,419 +525,424 @@ class _ViewScreenState extends State<ViewScreen> {
                   Container(
                     width: double.infinity,
                     margin: const EdgeInsets.only(bottom: 16),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                     decoration: BoxDecoration(
-                      color: AppColors.errorRed.withValues(alpha: 0.18),
+                      color: AppColors.errorRed.withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: AppColors.errorRed, width: 1.5),
-                      boxShadow: [
-                        BoxShadow(
-                          color: AppColors.errorRed.withValues(alpha: 0.2),
-                          blurRadius: 10,
-                        ),
-                      ],
+                      border: Border.all(color: AppColors.errorRed, width: 1),
                     ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.lock_clock_outlined, color: AppColors.errorRed, size: 22),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            _errorMessage!,
-                            style: const TextStyle(
-                              fontFamily: AppTheme.fontMonospace,
-                              fontSize: 13,
-                              fontWeight: FontWeight.bold,
-                              color: AppColors.errorRed,
-                              letterSpacing: 1.0,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-
-                // HEADING ABOVE UPLOAD SLOT: DECODE SCREEN
-                const Text(
-                  'Encoded Images (1 or more)',
-                  style: TextStyle(
-                    fontFamily: AppTheme.fontMonospace,
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: AppColors.textWhite,
-                    letterSpacing: 0.5,
-                  ),
-                ),
-                const SizedBox(height: 8),
-
-                Center(
-                  child: BracketBox(
-                    width: 220,
-                    height: 220,
-                    cornerColor: _state == ViewState.accessDenied
-                        ? AppColors.errorRed
-                        : AppColors.accentCyan,
-                    cornerLength: 22,
-                    strokeWidth: 2,
-                    backgroundColor: const Color(0x12FFFFFF),
-                    hasGlow: _encodedImages.isNotEmpty,
-                    onTap: _state == ViewState.idle ? _pickEncodedImage : null,
-                    child: _encodedImages.isNotEmpty
-                        ? _buildEncodedImagesThumbnail()
-                        : Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: const [
-                              Icon(
-                                Icons.add_photo_alternate_outlined,
-                                color: AppColors.accentCyan,
-                                size: 42,
-                              ),
-                              SizedBox(height: 8),
-                              Padding(
-                                padding: EdgeInsets.symmetric(horizontal: 10),
-                                child: Text(
-                                  'Select Encoded Images',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    fontFamily: AppTheme.fontMonospace,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.bold,
-                                    color: AppColors.textWhite,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                  ),
-                ),
-
-                const SizedBox(height: 24),
-
-                // MULTI-SELECT TOGGLES: Biometric, Password, Passkey
-                CustomToggle(
-                  label: AppStrings.biometric,
-                  value: _biometricOn,
-                  isEnabled: _state == ViewState.idle && _hasBiometricsEnrolled,
-                  subtitle: !_hasBiometricsEnrolled
-                      ? AppStrings.noBiometricsEnrolled
-                      : null,
-                  onChanged: (val) => setState(() => _biometricOn = val),
-                ),
-                const Divider(color: AppColors.cardBorder, height: 1),
-                CustomToggle(
-                  label: 'Password',
-                  value: _passwordOn,
-                  isEnabled: _state == ViewState.idle,
-                  onChanged: (val) => setState(() => _passwordOn = val),
-                ),
-                const Divider(color: AppColors.cardBorder, height: 1),
-                CustomToggle(
-                  label: AppStrings.passkey,
-                  value: _passkeyOn,
-                  isEnabled: _state == ViewState.idle,
-                  onChanged: (val) => setState(() => _passkeyOn = val),
-                ),
-
-                const SizedBox(height: 32),
-
-                // "Decode the Image" button appears as soon as at least one toggle is selected
-                if (_state == ViewState.idle && _canShowDecodeButton)
-                  PrimaryButton(
-                    text: 'DECODE THE IMAGE',
-                    icon: Icons.lock_open,
-                    onPressed: _startDecode,
-                  ),
-
-                // Progress bar runs to completion once all selected checks succeed
-                if (_state == ViewState.decoding) ...[
-                  const SizedBox(height: 12),
-                  const Text(
-                    'DECODING & EXTRACTING PAYLOAD...',
-                    style: TextStyle(
-                      fontFamily: AppTheme.fontMonospace,
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      color: AppColors.accentCyan,
-                      letterSpacing: 1.5,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  LinearProgressIndicator(
-                    value: _progress,
-                    backgroundColor: const Color(0xFF222222),
-                    valueColor: const AlwaysStoppedAnimation<Color>(AppColors.accentCyan),
-                    minHeight: 6,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    '${(_progress * 100).toInt()}%',
-                    style: const TextStyle(
-                      fontFamily: AppTheme.fontMonospace,
-                      fontSize: 11,
-                      color: AppColors.textGrey,
-                    ),
-                  ),
-                ],
-
-                // Once complete: DOWNLOAD and VIEW buttons side by side
-                if (_state == ViewState.success && _decodedFile != null) ...[
-                  const SizedBox(height: 20),
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: AppColors.card,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: AppColors.accentCyan, width: 1.5),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: const [
-                            Icon(
-                              Icons.check_circle_outline,
-                              color: AppColors.accentCyan,
-                              size: 24,
-                            ),
-                            SizedBox(width: 10),
-                            Text(
-                              'FILE REVEALED SUCCESSFULLY',
-                              style: TextStyle(
-                                fontFamily: AppTheme.fontMonospace,
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: AppColors.accentCyan,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 14),
-                        Row(
-                          children: [
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(4),
-                              child: SizedBox(
-                                width: 50,
-                                height: 50,
-                                child: Image.file(
-                                  _decodedFile!,
-                                  fit: BoxFit.cover,
-                                  errorBuilder: (_, __, ___) => const Icon(
-                                    Icons.insert_drive_file_outlined,
-                                    color: AppColors.accentCyan,
-                                    size: 32,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Text(
-                                _decodedFile!.path.split(Platform.pathSeparator).last,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontFamily: AppTheme.fontMonospace,
-                                  fontSize: 12,
-                                  color: AppColors.textWhite,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 20),
-                        // DOWNLOAD and VIEW buttons appear side by side
-                        Row(
-                          children: [
-                            Expanded(
-                              child: PrimaryButton(
-                                text: 'DOWNLOAD',
-                                icon: Icons.download_outlined,
-                                onPressed: () => _saveToGallery(_decodedFile!),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: PrimaryButton(
-                                text: 'VIEW',
-                                icon: Icons.visibility_outlined,
-                                borderColor: AppColors.accentCyan,
-                                onPressed: () => _openPreview(_decodedFile!),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Center(
-                    child: TextButton(
-                      onPressed: () {
-                        setState(() {
-                          _state = ViewState.idle;
-                          _encodedImages.clear();
-                          _decodedFiles.clear();
-                          _decodedFile = null;
-                          _biometricOn = false;
-                          _passwordOn = false;
-                          _passkeyOn = false;
-                        });
-                      },
-                      child: const Text(
-                        'DECODE ANOTHER IMAGE',
-                        style: TextStyle(
-                          fontFamily: AppTheme.fontMonospace,
-                          fontSize: 12,
-                          color: AppColors.textGrey,
-                        ),
+                    child: Text(
+                      _errorMessage!,
+                      style: const TextStyle(
+                        fontFamily: AppTheme.fontMonospace,
+                        fontSize: 12,
+                        color: AppColors.errorRed,
                       ),
                     ),
                   ),
+                ],
+
+                if (_state == ViewScreenState.idle) ...[
+                  // ENCODED IMAGES (1–10) picker header
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        AppStrings.encodedImages,
+                        style: TextStyle(
+                          fontFamily: AppTheme.fontMonospace,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.accentCyan,
+                          letterSpacing: 1.5,
+                        ),
+                      ),
+                      if (_encodedImages.isNotEmpty)
+                        Text(
+                          '${_encodedImages.length} of 10 selected',
+                          style: const TextStyle(
+                            fontFamily: AppTheme.fontMonospace,
+                            fontSize: 11,
+                            color: AppColors.textGrey,
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+
+                  // Upload slot / Horizontal thumbnail strip
+                  if (_encodedImages.isEmpty)
+                    BracketBox(
+                      width: double.infinity,
+                      height: 140,
+                      cornerColor: AppColors.accentCyan,
+                      cornerLength: 18,
+                      strokeWidth: 2,
+                      backgroundColor: const Color(0x12FFFFFF),
+                      onTap: _pickEncodedImages,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: const [
+                          Icon(
+                            Icons.add_photo_alternate_outlined,
+                            color: AppColors.accentCyan,
+                            size: 42,
+                          ),
+                          SizedBox(height: 10),
+                          Text(
+                            'Select Encoded Images to Reveal',
+                            style: TextStyle(
+                              fontFamily: AppTheme.fontMonospace,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: AppColors.textWhite,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else ...[
+                    SizedBox(
+                      height: 110,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _encodedImages.length < 10
+                            ? _encodedImages.length + 1
+                            : _encodedImages.length,
+                        separatorBuilder: (_, _) => const SizedBox(width: 10),
+                        itemBuilder: (ctx, index) {
+                          if (index == _encodedImages.length) {
+                            return GestureDetector(
+                              onTap: _pickEncodedImages,
+                              child: BracketBox(
+                                width: 90,
+                                height: 110,
+                                cornerLength: 12,
+                                strokeWidth: 1.5,
+                                backgroundColor: const Color(0x12FFFFFF),
+                                child: const Center(
+                                  child: Icon(Icons.add, color: AppColors.accentCyan, size: 28),
+                                ),
+                              ),
+                            );
+                          }
+
+                          final file = _encodedImages[index];
+                          return BracketBox(
+                            width: 90,
+                            height: 110,
+                            cornerLength: 12,
+                            strokeWidth: 1.5,
+                            padding: EdgeInsets.zero,
+                            backgroundColor: AppColors.card,
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(4),
+                                  child: Image.file(file, fit: BoxFit.cover),
+                                ),
+                                Positioned(
+                                  top: 4,
+                                  right: 4,
+                                  child: GestureDetector(
+                                    onTap: () => _removeEncodedImage(index),
+                                    child: Container(
+                                      padding: const EdgeInsets.all(3),
+                                      decoration: const BoxDecoration(
+                                        color: Colors.black87,
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: const Icon(
+                                        Icons.close,
+                                        color: AppColors.errorRed,
+                                        size: 13,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+
+                  const SizedBox(height: 32),
+
+                  // REVEAL BUTTON: Appears once at least one file selected
+                  if (_encodedImages.isNotEmpty)
+                    PrimaryButton(
+                      text: AppStrings.revealButton,
+                      icon: Icons.lock_open,
+                      onPressed: _startRevealSequence,
+                    ),
+                ] else ...[
+                  // Queue list during Processing and Results
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        _state == ViewScreenState.processing
+                            ? 'DECODING QUEUE (${_queueItems.where((q) => q.status == ItemDecodeStatus.success).length}/${_queueItems.length})'
+                            : 'DECODING COMPLETED',
+                        style: const TextStyle(
+                          fontFamily: AppTheme.fontMonospace,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.accentCyan,
+                          letterSpacing: 1.5,
+                        ),
+                      ),
+                      if (_state == ViewScreenState.processing)
+                        const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: AppColors.accentCyan,
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+
+                  ListView.separated(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _queueItems.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 12),
+                    itemBuilder: (ctx, index) {
+                      final item = _queueItems[index];
+
+                      return BracketBox(
+                        cornerLength: 14,
+                        strokeWidth: 1.5,
+                        padding: const EdgeInsets.all(12),
+                        backgroundColor: AppColors.card,
+                        cornerColor: item.status == ItemDecodeStatus.accessDenied ||
+                                item.status == ItemDecodeStatus.notTriCrypt
+                            ? AppColors.errorRed
+                            : AppColors.accentCyan,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(4),
+                                  child: SizedBox(
+                                    width: 44,
+                                    height: 44,
+                                    child: Image.file(
+                                      item.encodedFile,
+                                      fit: BoxFit.cover,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        item.filename,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontFamily: AppTheme.fontMonospace,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
+                                          color: AppColors.textWhite,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 3),
+                                      Text(
+                                        'Secured via: ${item.encryptionType.toUpperCase()}',
+                                        style: const TextStyle(
+                                          fontFamily: AppTheme.fontMonospace,
+                                          fontSize: 10,
+                                          color: AppColors.textGrey,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                if (item.status == ItemDecodeStatus.success)
+                                  const Icon(Icons.check_circle, color: AppColors.accentCyan, size: 20)
+                                else if (item.status == ItemDecodeStatus.decoding)
+                                  Text(
+                                    '${(item.progress * 100).toInt()}%',
+                                    style: const TextStyle(
+                                      fontFamily: AppTheme.fontMonospace,
+                                      fontSize: 11,
+                                      color: AppColors.accentCyan,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                              ],
+                            ),
+
+                            // Progress bar
+                            if (item.status == ItemDecodeStatus.decoding ||
+                                item.status == ItemDecodeStatus.pending) ...[
+                              const SizedBox(height: 10),
+                              LinearProgressIndicator(
+                                value: item.progress,
+                                backgroundColor: const Color(0xFF222222),
+                                valueColor: const AlwaysStoppedAnimation<Color>(AppColors.accentCyan),
+                                minHeight: 4,
+                              ),
+                            ],
+
+                            // Missing-credential state per prompt section 8
+                            if (item.status == ItemDecodeStatus.missingCredential) ...[
+                              const SizedBox(height: 10),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: AppColors.errorRed.withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(color: AppColors.errorRed.withValues(alpha: 0.5)),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        'Missing ${item.missingType ?? "credential"} to decode this file',
+                                        style: const TextStyle(
+                                          fontFamily: AppTheme.fontMonospace,
+                                          fontSize: 11,
+                                          color: AppColors.errorRed,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                    TextButton(
+                                      onPressed: () => _provideMissingCredential(item),
+                                      child: const Text(
+                                        'Provide it',
+                                        style: TextStyle(
+                                          fontFamily: AppTheme.fontMonospace,
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.bold,
+                                          color: AppColors.accentCyan,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+
+                            // Failure (wrong credential): row shows red "Access Denied" + retry
+                            if (item.status == ItemDecodeStatus.accessDenied) ...[
+                              const SizedBox(height: 10),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  const Text(
+                                    AppStrings.accessDenied,
+                                    style: TextStyle(
+                                      fontFamily: AppTheme.fontMonospace,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                      color: AppColors.errorRed,
+                                    ),
+                                  ),
+                                  TextButton(
+                                    onPressed: () => _retrySingleItem(item),
+                                    child: const Text(
+                                      'RETRY',
+                                      style: TextStyle(
+                                        fontFamily: AppTheme.fontMonospace,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: AppColors.accentCyan,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+
+                            // Not a TriCrypt image
+                            if (item.status == ItemDecodeStatus.notTriCrypt) ...[
+                              const SizedBox(height: 10),
+                              const Text(
+                                AppStrings.noHiddenData,
+                                style: TextStyle(
+                                  fontFamily: AppTheme.fontMonospace,
+                                  fontSize: 11,
+                                  color: AppColors.errorRed,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+
+                            // Success: row ends with DOWNLOAD always, and either VIEW (image) or OPEN (non-image)
+                            if (item.status == ItemDecodeStatus.success &&
+                                item.decodedResult != null) ...[
+                              const SizedBox(height: 12),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: PrimaryButton(
+                                      text: 'DOWNLOAD',
+                                      height: 36,
+                                      icon: Icons.download_outlined,
+                                      onPressed: () => _saveDecodedToGallery(item.decodedResult!),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: PrimaryButton(
+                                      text: item.isImageResult ? 'VIEW' : 'OPEN',
+                                      height: 36,
+                                      icon: item.isImageResult
+                                          ? Icons.visibility_outlined
+                                          : Icons.open_in_new,
+                                      borderColor: AppColors.accentCyan,
+                                      onPressed: () => _openDecodedFile(
+                                        item.decodedResult!,
+                                        item.isImageResult,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  if (_state == ViewScreenState.done) ...[
+                    Center(
+                      child: TextButton(
+                        onPressed: _resetToIdle,
+                        child: const Text(
+                          'DECODE MORE IMAGES',
+                          style: TextStyle(
+                            fontFamily: AppTheme.fontMonospace,
+                            fontSize: 12,
+                            color: AppColors.accentCyan,
+                            letterSpacing: 1.0,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
               ],
             ),
           ),
         ),
       ),
-    );
-  }
-
-  Widget _buildEncodedImagesThumbnail() {
-    if (_encodedImages.length == 1) {
-      return Stack(
-        fit: StackFit.expand,
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: Image.file(_encodedImages[0], fit: BoxFit.cover),
-          ),
-          if (_state == ViewState.idle)
-            Positioned(
-              top: 6,
-              right: 6,
-              child: GestureDetector(
-                onTap: () {
-                  setState(() {
-                    _encodedImages.clear();
-                    _decodedFiles.clear();
-                    _errorMessage = null;
-                  });
-                },
-                child: Container(
-                  padding: const EdgeInsets.all(4),
-                  decoration: const BoxDecoration(
-                    color: Colors.black87,
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.close,
-                    color: AppColors.accentCyan,
-                    size: 16,
-                  ),
-                ),
-              ),
-            ),
-        ],
-      );
-    }
-
-    // Stacked thumbnail treatment for multiple images
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        if (_encodedImages.length > 2)
-          Transform.translate(
-            offset: const Offset(12, -8),
-            child: Transform.rotate(
-              angle: 0.08,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: SizedBox(
-                  width: 135,
-                  height: 135,
-                  child: Image.file(_encodedImages[2], fit: BoxFit.cover),
-                ),
-              ),
-            ),
-          ),
-        Transform.translate(
-          offset: const Offset(-8, -6),
-          child: Transform.rotate(
-            angle: -0.06,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: SizedBox(
-                width: 145,
-                height: 145,
-                child: Image.file(_encodedImages[1], fit: BoxFit.cover),
-              ),
-            ),
-          ),
-        ),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(4),
-          child: SizedBox(
-            width: 155,
-            height: 155,
-            child: Image.file(_encodedImages[0], fit: BoxFit.cover),
-          ),
-        ),
-        Positioned(
-          bottom: 10,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: Colors.black87,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppColors.accentCyan, width: 1),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.layers, color: AppColors.accentCyan, size: 14),
-                const SizedBox(width: 4),
-                Text(
-                  '${_encodedImages.length} Images',
-                  style: const TextStyle(
-                    fontFamily: AppTheme.fontMonospace,
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: AppColors.textWhite,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        if (_state == ViewState.idle)
-          Positioned(
-            top: 6,
-            right: 6,
-            child: GestureDetector(
-              onTap: () {
-                setState(() {
-                  _encodedImages.clear();
-                  _decodedFiles.clear();
-                  _errorMessage = null;
-                });
-              },
-              child: Container(
-                padding: const EdgeInsets.all(4),
-                decoration: const BoxDecoration(
-                  color: Colors.black87,
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(
-                  Icons.close,
-                  color: AppColors.errorRed,
-                  size: 16,
-                ),
-              ),
-            ),
-          ),
-      ],
     );
   }
 }

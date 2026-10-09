@@ -61,8 +61,8 @@ class _SplashScreenState extends State<SplashScreen>
     if (hasSession) {
       Navigator.of(context).pushReplacement(
         PageRouteBuilder(
-          pageBuilder: (_, __, ___) => const MainNavScreen(),
-          transitionsBuilder: (_, animation, __, child) =>
+          pageBuilder: (_, _, _) => const MainNavScreen(),
+          transitionsBuilder: (_, animation, _, child) =>
               FadeTransition(opacity: animation, child: child),
           transitionDuration: const Duration(milliseconds: 500),
         ),
@@ -70,8 +70,8 @@ class _SplashScreenState extends State<SplashScreen>
     } else {
       Navigator.of(context).pushReplacement(
         PageRouteBuilder(
-          pageBuilder: (_, __, ___) => const LoginScreen(),
-          transitionsBuilder: (_, animation, __, child) =>
+          pageBuilder: (_, _, _) => const LoginScreen(),
+          transitionsBuilder: (_, animation, _, child) =>
               FadeTransition(opacity: animation, child: child),
           transitionDuration: const Duration(milliseconds: 500),
         ),

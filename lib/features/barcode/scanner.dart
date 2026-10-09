@@ -6,7 +6,7 @@ import '../../core/theme.dart';
 import '../../core/widgets.dart';
 import '../../data/album_db.dart';
 import '../../data/stubs.dart';
-import '../preview/preview.dart';
+import '../home/home.dart';
 
 enum ScannerState {
   scanning,
@@ -368,8 +368,21 @@ class _ScannerScreenState extends State<ScannerScreen> {
                   letterSpacing: 1.5,
                 ),
               ),
+              if (_receivedFile != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  _receivedFile!.path.split(Platform.pathSeparator).last,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontFamily: AppTheme.fontMonospace,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.accentCyan,
+                  ),
+                ),
+              ],
               const SizedBox(height: 6),
-              Text(
+              const Text(
                 'The file was added to your Gallery index (still encrypted).',
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -380,17 +393,16 @@ class _ScannerScreenState extends State<ScannerScreen> {
               ),
               const SizedBox(height: 22),
               PrimaryButton(
-                text: 'OPEN PREVIEW',
+                text: 'OPEN GALLERY',
                 onPressed: () {
-                  if (_receivedFile != null) {
-                    Navigator.of(context).pushReplacement(
-                      PageRouteBuilder(
-                        pageBuilder: (_, __, ___) => PreviewScreen(imageFile: _receivedFile!),
-                        transitionsBuilder: (_, animation, __, child) =>
-                            FadeTransition(opacity: animation, child: child),
-                      ),
-                    );
-                  }
+                  Navigator.of(context).pushAndRemoveUntil(
+                    PageRouteBuilder(
+                      pageBuilder: (_, _, _) => const MainNavScreen(initialIndex: 3),
+                      transitionsBuilder: (_, animation, _, child) =>
+                          FadeTransition(opacity: animation, child: child),
+                    ),
+                    (route) => false,
+                  );
                 },
               ),
               const SizedBox(height: 10),

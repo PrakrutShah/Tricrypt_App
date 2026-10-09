@@ -195,6 +195,16 @@ class AuthService {
             user.email?.split('@').first ??
             'User';
 
+        // Real-time update in Supabase user_logins table with inputs entered in login form
+        try {
+          await _supabase!.from('user_logins').upsert({
+            'id': user.id,
+            'email': email.trim(),
+            'remember_me': rememberMe,
+            'login_time': DateTime.now().toUtc().toIso8601String(),
+          });
+        } catch (_) {}
+
         await _secureStore.saveSession(
           sessionToken: session.accessToken,
           userId: user.id,
@@ -271,6 +281,16 @@ class AuthService {
         final session = res.session;
         final username = displayName;
 
+        // Initial insert into Supabase user_logins table
+        try {
+          await _supabase!.from('user_logins').upsert({
+            'id': user.id,
+            'email': email.trim(),
+            'remember_me': true,
+            'login_time': DateTime.now().toUtc().toIso8601String(),
+          });
+        } catch (_) {}
+
         if (session != null) {
           await _secureStore.saveSession(
             sessionToken: session.accessToken,
@@ -312,6 +332,40 @@ class AuthService {
       );
     }
   }
+
+  /// Fetches the login details entered in the login form from Supabase user_logins table.
+  Future<Map<String, dynamic>?> getLoginData(String userId) async {
+    try {
+      if (SupabaseConfig.isConfigured && _supabase != null) {
+        final data = await _supabase!
+            .from('user_logins')
+            .select()
+            .eq('id', userId)
+            .maybeSingle();
+        return data;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Streams real-time updates for a user's login form data from Supabase.
+  Stream<List<Map<String, dynamic>>>? streamLoginData(String userId) {
+    try {
+      if (SupabaseConfig.isConfigured && _supabase != null) {
+        return _supabase!
+            .from('user_logins')
+            .stream(primaryKey: ['id'])
+            .eq('id', userId);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Backward-compatible alias for getLoginData
+  Future<Map<String, dynamic>?> getUserProfile(String userId) => getLoginData(userId);
+
+  /// Backward-compatible alias for streamLoginData
+  Stream<List<Map<String, dynamic>>>? streamUserProfile(String userId) => streamLoginData(userId);
 
   Future<void> trySilentRefresh() async {
     final isOnline = await _connectivity.checkOnline();

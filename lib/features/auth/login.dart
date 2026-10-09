@@ -77,8 +77,8 @@ class _LoginScreenState extends State<LoginScreen> {
     if (result.isSuccess) {
       Navigator.of(context).pushReplacement(
         PageRouteBuilder(
-          pageBuilder: (_, __, ___) => const MainNavScreen(isFirstTimeSignUp: false),
-          transitionsBuilder: (_, animation, __, child) =>
+          pageBuilder: (_, _, _) => const MainNavScreen(isFirstTimeSignUp: false),
+          transitionsBuilder: (_, animation, _, child) =>
               FadeTransition(opacity: animation, child: child),
           transitionDuration: const Duration(milliseconds: 400),
         ),
@@ -149,8 +149,8 @@ class _LoginScreenState extends State<LoginScreen> {
                 onTap: () {
                   Navigator.of(context).push(
                     PageRouteBuilder(
-                      pageBuilder: (_, __, ___) => const SignupScreen(),
-                      transitionsBuilder: (_, animation, __, child) =>
+                      pageBuilder: (_, _, _) => const SignupScreen(),
+                      transitionsBuilder: (_, animation, _, child) =>
                           FadeTransition(opacity: animation, child: child),
                     ),
                   );
@@ -250,8 +250,8 @@ class _LoginScreenState extends State<LoginScreen> {
                   onTap: () {
                     Navigator.of(context).push(
                       PageRouteBuilder(
-                        pageBuilder: (_, __, ___) => const SignupScreen(),
-                        transitionsBuilder: (_, animation, __, child) =>
+                        pageBuilder: (_, _, _) => const SignupScreen(),
+                        transitionsBuilder: (_, animation, _, child) =>
                             FadeTransition(opacity: animation, child: child),
                       ),
                     );

@@ -9,9 +9,9 @@ import '../preview/preview.dart';
 enum GalleryFilter { all, encrypted, decoded }
 
 class GalleryScreen extends StatefulWidget {
-  final VoidCallback? onBackToHome;
+  final VoidCallback? onGoHome;
 
-  const GalleryScreen({super.key, this.onBackToHome});
+  const GalleryScreen({super.key, this.onGoHome});
 
   @override
   State<GalleryScreen> createState() => _GalleryScreenState();
@@ -130,19 +130,11 @@ class _GalleryScreenState extends State<GalleryScreen> {
     final file = File(item.filepath);
     Navigator.of(context).push(
       PageRouteBuilder(
-        pageBuilder: (_, __, ___) => PreviewScreen(imageFile: file),
-        transitionsBuilder: (_, animation, __, child) =>
+        pageBuilder: (_, _, _) => PreviewScreen(imageFile: file),
+        transitionsBuilder: (_, animation, _, child) =>
             FadeTransition(opacity: animation, child: child),
       ),
     );
-  }
-
-  void _handleBack() {
-    if (widget.onBackToHome != null) {
-      widget.onBackToHome!();
-    } else if (Navigator.of(context).canPop()) {
-      Navigator.of(context).pop();
-    }
   }
 
   @override
@@ -155,34 +147,10 @@ class _GalleryScreenState extends State<GalleryScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Top bar with Back Arrow
-              Row(
-                children: [
-                  GestureDetector(
-                    onTap: _handleBack,
-                    child: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: AppColors.card,
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: AppColors.accentCyan.withValues(alpha: 0.6),
-                          width: 1,
-                        ),
-                      ),
-                      child: const Icon(
-                        Icons.arrow_back,
-                        color: AppColors.accentCyan,
-                        size: 20,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  const GradientTitle(
-                    text: 'Gallery',
-                    fontSize: 28,
-                  ),
-                ],
+              // Top bar: "Gallery". No back arrow.
+              const GradientTitle(
+                text: 'Gallery',
+                fontSize: 28,
               ),
 
               const SizedBox(height: 16),
@@ -267,7 +235,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
           ),
           const SizedBox(height: 16),
           const Text(
-            'No files',
+            AppStrings.noItemsYet,
             style: TextStyle(
               fontFamily: AppTheme.fontMonospace,
               fontSize: 18,
@@ -277,7 +245,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
           ),
           const SizedBox(height: 6),
           const Text(
-            'Hide or decode an image to see it here.',
+            AppStrings.noItemsSubtext,
             textAlign: TextAlign.center,
             style: TextStyle(
               fontFamily: AppTheme.fontMonospace,
@@ -321,7 +289,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
                   child: Image.file(
                     thumbFile.existsSync() ? thumbFile : file,
                     fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const Center(
+                    errorBuilder: (_, _, _) => const Center(
                       child: Icon(
                         Icons.image_outlined,
                         color: AppColors.accentCyan,

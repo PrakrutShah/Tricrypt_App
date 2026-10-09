@@ -60,17 +60,21 @@ class AppStrings {
 
   // Hide Screen
   static const String coverImage = 'COVER IMAGE';
-  static const String secretFiles = 'SECRET FILES (1 or more)';
+  static const String secretFiles = 'SECRET FILES (1–10)';
   static const String biometric = 'BIOMETRIC';
   static const String passkey = 'PASSKEY';
   static const String hideButton = 'HIDE';
   static const String noBiometricsEnrolled = 'No fingerprint or Face ID enrolled';
+  static const String maxSelectionsError = 'You can only select up to 10 images at a time.';
+
+  static String overCapacityError(String selectedSize, String capacitySize) =>
+      'Selected files ($selectedSize) are larger than this cover image can hold ($capacitySize). A cover image can only hide data up to roughly its own size — pick a larger cover image or remove some files.';
 
   // View Screen
-  static const String encodedImage = 'ENCODED IMAGE';
+  static const String encodedImages = 'ENCODED IMAGES (1–10)';
   static const String revealButton = 'REVEAL';
   static const String accessDenied = 'Access Denied';
-  static const String noHiddenData = 'This image has no hidden data.';
+  static const String noHiddenData = 'This image has no hidden data';
 
   // Gallery Screen
   static const String noItemsYet = 'No items yet.';
@@ -89,13 +93,15 @@ class SupabaseConfig {
 
   static const String supabaseUrl = String.fromEnvironment(
     'SUPABASE_URL',
-    defaultValue: 'https://xyzcompany.supabase.co',
+    defaultValue: 'https://tdsmnzbuzwtdvldievag.supabase.co',
   );
 
   static const String supabaseAnonKey = String.fromEnvironment(
     'SUPABASE_ANON_KEY',
-    defaultValue: 'public-anon-key-placeholder',
+    defaultValue: 'sb_publishable_XLgmrosm7DsD47ehBDUTXw_8w00waGB',
   );
+
+  static String get publishableKey => supabaseAnonKey;
 
   static bool get isConfigured =>
       supabaseUrl != 'https://xyzcompany.supabase.co' &&

@@ -490,7 +490,7 @@ class CustomToggle extends StatelessWidget {
                         onChanged!(val);
                       }
                     : null,
-                activeColor: AppColors.accentCyan,
+                activeThumbColor: AppColors.accentCyan,
                 activeTrackColor: AppColors.accentCyan.withValues(alpha: 0.35),
                 inactiveThumbColor: AppColors.textGrey,
                 inactiveTrackColor: const Color(0xFF222222),

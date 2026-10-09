@@ -14,29 +14,40 @@ class SignupScreen extends StatefulWidget {
 }
 
 class _SignupScreenState extends State<SignupScreen> {
+  final _nameController = TextEditingController();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _confirmPasswordController = TextEditingController();
 
   bool _isLoading = false;
   String? _errorMessage;
   String? _infoMessage;
+  String? _nameError;
   String? _emailError;
   String? _passwordError;
+  String? _confirmPasswordError;
 
   final AuthService _authService = AuthService();
   final ConnectivityService _connectivity = ConnectivityService();
 
   @override
   void dispose() {
+    _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
+    _confirmPasswordController.dispose();
     super.dispose();
   }
 
   void _validateInputs() {
     setState(() {
+      _nameError = _nameController.text.trim().isEmpty ? 'Name is required' : null;
       _emailError = Validators.validateEmail(_emailController.text);
       _passwordError = Validators.validatePassword(_passwordController.text);
+      _confirmPasswordError = Validators.validateConfirmPassword(
+        _confirmPasswordController.text,
+        _passwordController.text,
+      );
     });
   }
 
@@ -44,7 +55,10 @@ class _SignupScreenState extends State<SignupScreen> {
     FocusScope.of(context).unfocus();
     _validateInputs();
 
-    if (_emailError != null || _passwordError != null) {
+    if (_nameError != null ||
+        _emailError != null ||
+        _passwordError != null ||
+        _confirmPasswordError != null) {
       return;
     }
 
@@ -63,6 +77,7 @@ class _SignupScreenState extends State<SignupScreen> {
     });
 
     final result = await _authService.signUp(
+      name: _nameController.text.trim(),
       email: _emailController.text.trim(),
       password: _passwordController.text,
     );
@@ -74,10 +89,20 @@ class _SignupScreenState extends State<SignupScreen> {
     });
 
     if (result.isSuccess) {
+      // Check if session exists or email confirmation required
+      final session = await AuthService().hasSavedSession();
+      if (!mounted) return;
+      if (!session) {
+        setState(() {
+          _infoMessage = 'Check your email to verify your account.';
+        });
+        return;
+      }
+
       Navigator.of(context).pushAndRemoveUntil(
         PageRouteBuilder(
-          pageBuilder: (_, __, ___) => const MainNavScreen(isFirstTimeSignUp: true),
-          transitionsBuilder: (_, animation, __, child) =>
+          pageBuilder: (_, _, _) => const MainNavScreen(isFirstTimeSignUp: true),
+          transitionsBuilder: (_, animation, _, child) =>
               FadeTransition(opacity: animation, child: child),
         ),
         (route) => false,
@@ -211,7 +236,20 @@ class _SignupScreenState extends State<SignupScreen> {
                 ),
               ),
 
-              const SizedBox(height: 36),
+              const SizedBox(height: 32),
+
+              BracketTextField(
+                label: 'NAME',
+                controller: _nameController,
+                keyboardType: TextInputType.name,
+                errorText: _nameError,
+                hintText: 'Your name',
+                onChanged: (_) {
+                  if (_nameError != null) setState(() => _nameError = null);
+                },
+              ),
+
+              const SizedBox(height: 20),
 
               BracketTextField(
                 label: 'EMAIL',
@@ -236,6 +274,21 @@ class _SignupScreenState extends State<SignupScreen> {
                 hintText: '••••••••',
                 onChanged: (_) {
                   if (_passwordError != null) setState(() => _passwordError = null);
+                },
+              ),
+
+              const SizedBox(height: 20),
+
+              BracketTextField(
+                label: 'CONFIRM PASSWORD',
+                controller: _confirmPasswordController,
+                isPassword: true,
+                errorText: _confirmPasswordError,
+                hintText: '••••••••',
+                onChanged: (_) {
+                  if (_confirmPasswordError != null) {
+                    setState(() => _confirmPasswordError = null);
+                  }
                 },
               ),
 
